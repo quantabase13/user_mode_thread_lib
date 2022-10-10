@@ -1,205 +1,175 @@
 #include "pthread_lib.h"
 
 
-int pthread_create(_pthread_t *thread, const _pthread_attr_t *attr, void *(*start_routine)(void*), void *arg)
+static void pthread_wrapper(struct task *task);
+static void pthread_subsystem_init();
+static void pthread_scheduler(int sig);
+static long int i64_ptr_mangle(long int p);
+static long int i64_ptr_mangle_re(long int p);
+
+
+int pthread_create(_pthread_t *thread, const _pthread_attr_t *attr, void*(*start_routine)(void*), void *args)
 {
     static bool first_run = true;
-    static int index = 1;
+    static int thread_index = 1;
     if (first_run){
         first_run = false;
-        thread_initilize();
+         pthread_subsystem_init();
     }
     
-    struct task *t = malloc(sizeof(struct task));
-    long int *stack_address = (long int *)malloc(STACK_SIZE);
-    stack_address += STACK_SIZE>>2 ;
+    struct task *task = malloc(sizeof(struct task));
+    long int *stack = (long int *) malloc(STACK_SIZE);
+    stack += STACK_SIZE >>2;
     
-    (t->env)[0].__jmpbuf[6] = i64_ptr_mangle((long int)stack_address);
-    (t->env)[0].__jmpbuf[7]=i64_ptr_mangle((long int)start_routine);
+    (task->env)[0].__jmpbuf[6] = i64_ptr_mangle((long int)stack);
+    (task->env)[0].__jmpbuf[7] = i64_ptr_mangle((long int)start_routine);
 
-    t->running = false;
-    t->block = false;
-    t->initialized = false;
-    t->terminated = false;
-    t->task_index = index;
-    t->thread_waited = 0;
-    t->arg = arg;
-    t->stack_address = stack_address;
-    *thread = index;
-    index++;
-    INIT_LIST_HEAD(&t->list);
-    list_add_tail(&t->list, &tasklist);
+    task->state = INITIALIZED;
+    task->thread_waited = 0;
+    task->args = args;
+    task->stack = stack;
+    task->thread_index = thread_index;
+    *thread = thread_index;
+    thread_index++;
+    INIT_LIST_HEAD(&task->list);
+    list_add_tail(&task->list, &(tasklist.task));
+
+    return 0;
 }
+
+
+static void pthread_scheduler(int sig)
+{
+    static bool first_run = true;
+    if (list_empty(&(tasklist.task))){
+        return;
+    }
+    if (first_run){
+        first_run = false;
+        //TODO: add lock to protect tasklist
+        struct task *task_first = list_first_entry(&(tasklist.task), struct task, list);
+        task_first->state = RUNNING;
+        tasklist.current = task_first;
+        //end TODO
+        pthread_wrapper(task_first);
+    }
+    
+    jmp_buf task_current;
+    setjmp(task_current);
+
+/*context switch code start*/
+    long int rbp_encrypted = task_current[0].__jmpbuf[1];
+    long int rbp = i64_ptr_mangle_re(rbp_encrypted);
+    long int rbp_former = *((long int*)(rbp));
+    long int rip_former = *(long int*)(rbp +8);
+    long int rsp_former = rbp + 16;
+    task_current[0].__jmpbuf[6] = i64_ptr_mangle(rsp_former);
+    task_current[0].__jmpbuf[7]=i64_ptr_mangle(rip_former); 
+    task_current[0].__jmpbuf[1] = i64_ptr_mangle(rbp_former);
+    memcpy((tasklist.current)->env, task_current, sizeof(jmp_buf));
+
+    struct task *task_next = list_entry((tasklist.current)->list.next, struct task, list);
+    if (&task_next->list  == &(tasklist.task)){
+        task_next = list_first_entry(&(tasklist.task), struct task, list);
+    }
+
+    switch(task_next->state){
+        case INITIALIZED:{
+            task_next->state = RUNNING;
+            tasklist.current = task_next;
+            pthread_wrapper(task_next);
+        }
+     
+        default:
+            tasklist.current = task_next;
+            longjmp(task_next->env, 1);
+    }
+    /*context switch code end*/
+
+}
+
+void yield()
+{
+    jmp_buf task_current;
+    setjmp(task_current);
+
+    long int rbp_encrypted = task_current[0].__jmpbuf[1];
+    long int rbp = i64_ptr_mangle_re(rbp_encrypted);
+    long int rbp_former = *((long int*)(rbp));
+    long int rip_former = *(long int*)(rbp +8);
+    long int rsp_former = rbp + 16;
+    task_current[0].__jmpbuf[6] = i64_ptr_mangle(rsp_former);
+    task_current[0].__jmpbuf[7]=i64_ptr_mangle(rip_former); 
+    task_current[0].__jmpbuf[1] = i64_ptr_mangle(rbp_former);
+    memcpy((tasklist.current)->env, task_current, sizeof(jmp_buf));
+
+    struct task *task_next = list_entry((tasklist.current)->list.next, struct task, list);
+    if (&task_next->list  == &(tasklist.task)){
+        task_next = list_first_entry(&(tasklist.task), struct task, list);
+    }
+
+    switch(task_next->state){
+        case INITIALIZED:{
+            task_next->state = RUNNING;
+            tasklist.current = task_next;
+            pthread_wrapper(task_next);
+        }
+     
+        default:
+            tasklist.current = task_next;
+            longjmp(task_next->env, 1);
+    }
+}
+
 _pthread_t pthread_self(void)
 {
-    struct task *cur;
-    list_for_each_entry(cur, &tasklist, list){
-        if (cur->running == true){
-            return (_pthread_t) cur->task_index;
-        }
-    }
-
+    return (_pthread_t)(tasklist.current)->thread_index;
 }
+
 void pthread_exit(void *value_ptr)
 {
-    struct task *cur;
+    struct task *task_next = list_entry((tasklist.current)->list.next, struct task, list);
+    tasklist.current->state = TERMINATED;
+    tasklist.current->retval = value_ptr;
+    long int *stack = tasklist.current->stack - (STACK_SIZE>>2);
+    free(stack);
     
-    list_for_each_entry(cur, &tasklist, list){
-        if (cur->running == true){
-            struct task *t_next = list_entry(cur->list.next, struct task, list);
-            list_del(&(cur->list));
-            long int *_stack_address = (cur -> stack_address )-= STACK_SIZE>>2;
-            free(_stack_address);
-            free(cur);
-            
-             if (&t_next->list == &tasklist){
-                t_next = list_first_entry(&tasklist, struct task, list);
-            }    
-           
-            t_next->running = true;
-            if (!t_next->initialized){
-                t_next ->initialized = true;
-                pthread_wrapper_init(t_next);
-            }
-            longjmp(t_next->env, 1);           
+
+    switch(task_next->state){
+        case INITIALIZED:{
+            task_next->state = RUNNING;
+            tasklist.current = task_next;
+            pthread_wrapper(task_next);
         }
-    }
-    
+        default:
+            tasklist.current = task_next;
+            longjmp(task_next->env, 1);
+        }
+   
 }
 
-int pthread_join(_pthread_t thread, void **value_ptr)
+static void pthread_subsystem_init()
 {
-    struct task *cur;
-    struct task *caller;
-
-    list_for_each_entry(cur, &tasklist, list){
-        if (cur->task_index == (int)thread){
-            if (cur->terminated){
-                return 0;
-            }else{
-                    list_for_each_entry(caller, &tasklist, list){
-                    if (caller->running){
-                        caller->running = false;
-                        caller->block = true;
-                        cur->thread_waited = caller->task_index;
-                     }
-                    }
-            }
-        }
-    }
-}
-
-
-void thread_initilize()
-{
+    tasklist = (tasklist_t)TASKLIST_INITIALIZER(tasklist);
     struct sigaction *act = malloc(sizeof(struct sigaction));
-    // struct sigaction act;
-    // act.sa_handler = scheduler;
-    // act.sa_flags = SA_NODEFER;
-    // sigaction(SIGALRM, &act, NULL);
-    act->sa_handler = scheduler;
+    act->sa_handler = pthread_scheduler;
     act->sa_flags = SA_NODEFER;
     sigaction(SIGALRM, act, NULL);
     ualarm(500,500);
 }
 
-void yield()
+static void pthread_wrapper(struct task *task)
 {
-    jmp_buf t_current;
-    setjmp(t_current);
-    struct task *cur;
-    list_for_each_entry(cur, &tasklist, list){
-        if (cur->running == true){
-            cur->running = false;
-
-            long int rbp_encrypted = t_current[0].__jmpbuf[1];
-            long int rbp = i64_ptr_mangle_re(rbp_encrypted);
-            long int rbp_former = *((long int*)(rbp));
-            long int rip_former = *(long int*)(rbp +8);
-            long int rsp_former = rbp + 16;
-            t_current[0].__jmpbuf[6] = i64_ptr_mangle(rsp_former);
-            t_current[0].__jmpbuf[7]=i64_ptr_mangle(rip_former); 
-            t_current[0].__jmpbuf[1] = i64_ptr_mangle(rbp_former);
-            memcpy(cur->env, t_current, sizeof(jmp_buf));
-
-            
-            struct task *t_next = list_entry(cur->list.next, struct task, list);
-
-            t_next->running = true;
-            if (!t_next->initialized){
-            t_next ->initialized = true;
-            pthread_wrapper_init(t_next);
-            }
-            longjmp(t_next->env, 1);
-        }
-    }
-}
-
-static void pthread_wrapper_init(struct task *task){
-
     long int rsp_encrypted = (task->env)[0].__jmpbuf[6];
     long int rsp = i64_ptr_mangle_re(rsp_encrypted);
     long int pc_encrypted = (task->env)[0].__jmpbuf[7];
     long int pc = i64_ptr_mangle_re(pc_encrypted);
     void *value_ptr;
-    // asm("mov %0, %%rdi;"::"r"(task->arg));
     asm("mov %0, %%rsp;" : :"r"(rsp)); 
-    // asm("mov %0, %%rax;"::"r"(pc+1));
-    // asm("call *%rax;");
-    ((void(*)(void *)) (pc)) (task->arg);
+    ((void(*)(void *)) (pc)) (task->args);
     asm("mov %%rax, %0;":"=r"(value_ptr)::);
     pthread_exit(value_ptr);
-    // ((void(*)(void *)) (pc)) (task->arg);
 }
-
-/*a simple Round-Robin scheduler*/
-void scheduler(int sig)
-{
-    static bool first_run = true;
-    if (list_empty(&tasklist)){
-        return;
-    }
-    if (first_run){
-        first_run = false;
-        struct task *t_first = list_first_entry(&tasklist, struct task, list);
-        t_first->running = true;
-        t_first->initialized = true;
-        pthread_wrapper_init(t_first);
-        
-    }
-    jmp_buf t_current;
-    setjmp(t_current);
-    struct task *cur;
-    list_for_each_entry(cur, &tasklist, list){
-        if (cur->running == true){
-            cur->running = false;
-
-            long int rbp_encrypted = t_current[0].__jmpbuf[1];
-            long int rbp = i64_ptr_mangle_re(rbp_encrypted);
-            long int rbp_former = *((long int*)(rbp));
-            long int rip_former = *(long int*)(rbp +8);
-            long int rsp_former = rbp + 16;
-            t_current[0].__jmpbuf[6] = i64_ptr_mangle(rsp_former);
-            t_current[0].__jmpbuf[7]=i64_ptr_mangle(rip_former); 
-            t_current[0].__jmpbuf[1] = i64_ptr_mangle(rbp_former);
-            memcpy(cur->env, t_current, sizeof(jmp_buf));
-
-            struct task *t_next = list_entry(cur->list.next, struct task, list);
-            if (&t_next->list == &tasklist){
-                t_next = list_first_entry(&tasklist, struct task, list);
-            }
-           
-           
-            t_next->running = true;
-            if (!t_next->initialized){
-            t_next ->initialized = true;
-            pthread_wrapper_init(t_next);
-            }
-            longjmp(t_next->env, 1);
-        }
-    }
-}
-
 
 
 static long int i64_ptr_mangle(long int p)

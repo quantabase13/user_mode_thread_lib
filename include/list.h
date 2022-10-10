@@ -65,6 +65,8 @@ struct list_head {
  */
 #define LIST_HEAD(head) struct list_head head = {&(head), &(head)}
 
+
+#define LIST_HEAD_INIT(name) { &(name), &(name) }
 /**
  * INIT_LIST_HEAD() - Initialize empty list head
  * @head: pointer to list head

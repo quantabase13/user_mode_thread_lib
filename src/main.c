@@ -1,6 +1,6 @@
 
 #include <stdio.h>
-#include "pthread.h"
+#include "pthread_lib.h"
 
 
 
@@ -51,9 +51,7 @@ int foo(void *arg)
     //     // SpinUnlock(&lock);
     //     // yield();
     // }
-     char *a = "2\n";
-    write(STDOUT_FILENO, a, 2);
-    return 0xdeadbeef;
+
     // pthread_exit(NULL);
 }
 

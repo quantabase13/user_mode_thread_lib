@@ -1,21 +1,32 @@
 #include <setjmp.h>
+#include <stdbool.h>
 #include <signal.h>
+#include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdbool.h>
 #include "list.h"
 
+
 #define STACK_SIZE 32767
+#define TASKLIST_INITIALIZER(name)\
+{									\
+	.current		= NULL,						\
+	.task	= LIST_HEAD_INIT((name).task),		\
+}
+
 
 struct task{
     jmp_buf env;
-    void *arg;
-    int task_index;
-    long int *stack_address;
-    bool running;
-    bool block;
-    bool terminated;
-    bool initialized;
+    long int *stack;
+    enum{
+        INITIALIZED,
+        RUNNING,
+        WAITING,
+        TERMINATED
+    }state;
+    void *args;
+    void *retval;
+    int thread_index;
     int thread_waited;
     struct list_head list;
 };
@@ -25,15 +36,15 @@ typedef struct {
     struct task *task;
 }_pthread_attr_t;
 
-static LIST_HEAD(tasklist);
+typedef struct tasklist{
+    struct task* current;
+    struct list_head task;
+}tasklist_t;
 
-int pthread_create(_pthread_t *thread, const _pthread_attr_t *attr, void *(*start_routine)(void*), void *arg);
+tasklist_t tasklist;
+// TASKLIST_INITIALIZER(tasklist);
+
+int pthread_create(_pthread_t *thread, const _pthread_attr_t *attr, void*(*start_routine)(void* ), void* args);
 void pthread_exit(void *value_ptr);
-int pthread_join(_pthread_t thread, void **value_ptr);
-static void pthread_wrapper_init(struct task *task);
+void yield();
 _pthread_t pthread_self(void);
-static void thread_initilize();
-static void scheduler(int sig);
-static void yield();
-static long int i64_ptr_mangle(long int p);
-static long int i64_ptr_mangle_re(long int p);
