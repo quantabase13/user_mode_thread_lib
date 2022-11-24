@@ -7,7 +7,7 @@
 #include "list.h"
 
 
-#define STACK_SIZE 32767
+#define STACK_SIZE 1024 * 32
 #define TASKLIST_INITIALIZER(name)\
 {									\
 	.current		= NULL,						\
@@ -17,8 +17,8 @@
 
 struct task{
     jmp_buf env;
-    long int *stack;
     enum{
+        NOT_STARTED = 0,
         INITIALIZED,
         RUNNING,
         WAITING,
@@ -29,6 +29,7 @@ struct task{
     int thread_index;
     int thread_waited;
     struct list_head list;
+    char stack[1];
 };
 
 typedef int _pthread_t;
